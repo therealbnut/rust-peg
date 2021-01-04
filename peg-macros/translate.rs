@@ -317,19 +317,48 @@ fn ordered_choice(mut rs: impl DoubleEndedIterator<Item = TokenStream>) -> Token
 
 fn labeled_seq(context: &Context, exprs: &[TaggedExpr], inner: TokenStream) -> TokenStream {
     exprs.iter().rfold(inner, |then, expr| {
-        let value_name = expr.name.as_ref();
-        let name_pat = name_or_ignore(value_name);
-
-        let seq_res = compile_expr(context, &expr.expr, value_name.is_some());
-
-        quote! {{
-            let __seq_res = #seq_res;
-            match __seq_res {
-                ::peg::RuleResult::Matched(__pos, #name_pat) => { #then }
-                ::peg::RuleResult::Failed => ::peg::RuleResult::Failed,
-            }
-        }}
+        compile_expr_continuation(context, &expr.expr, expr.name.as_ref(), then)
     })
+}
+
+fn compile_expr_continuation(context: &Context, e: &Expr, result_name: Option<&Ident>, continuation: TokenStream) -> TokenStream {
+    let result_pat = name_or_ignore(result_name);
+    match e {
+       LiteralExpr(ref s) => {
+            let escaped_str = s.to_string();
+            quote! {
+                match ::peg::ParseLiteral::parse_string_literal(__input, __pos, #s) {
+                    ::peg::RuleResult::Matched(__pos, #result_pat) => { #continuation },
+                    ::peg::RuleResult::Failed => { __err_state.mark_failure(__pos, #escaped_str); ::peg::RuleResult::Failed }
+                }
+            }
+        }
+
+        PatternExpr(ref pattern) => {
+            let pat_str = pattern.to_string();
+
+            quote!{
+                match ::peg::ParseElem::parse_elem(__input, __pos) {
+                    ::peg::RuleResult::Matched(__next, __val) => match __val {
+                        #pattern =>  { let __pos = __next; let #result_pat = (); { #continuation }},
+                        _ => { __err_state.mark_failure(__pos, #pat_str); ::peg::RuleResult::Failed },
+                    }
+                    ::peg::RuleResult::Failed => { __err_state.mark_failure(__pos, #pat_str); ::peg::RuleResult::Failed }
+                }
+            }
+        }
+
+        e => {
+            let seq_res = compile_expr(context, e, result_name.is_some());
+            quote! {{
+                let __seq_res = #seq_res;
+                match __seq_res {
+                    ::peg::RuleResult::Matched(__pos, #result_pat) => { #continuation }
+                    ::peg::RuleResult::Failed => ::peg::RuleResult::Failed,
+                }
+            }}
+        }
+    }
 }
 
 fn compile_expr(context: &Context, e: &Expr, result_used: bool) -> TokenStream {
